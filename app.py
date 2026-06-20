@@ -1,287 +1,264 @@
-"""
-Auto Inventory Dashboard
--------------------------
-A small Flask web app to manage a vehicle inventory (CRUD) and
-visualize it on a dashboard (charts by brand, fuel type, price, year).
-
-Run:
-    pip install -r requirements.txt
-    python app.py
-
-Then open http://127.0.0.1:5000
-"""
-
-import os
-import sqlite3
-from datetime import datetime
-
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
-
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DB_PATH = os.path.join(BASE_DIR, "auto.db")
-
-app = Flask(__name__)
-app.secret_key = "dev-secret-key-change-in-production"
 
 
-# --------------------------------------------------------------------------- #
-# Database helpers
-# --------------------------------------------------------------------------- #
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+import io
+import zipfile
+import datetime
 
+import pandas as pd
+import streamlit as st
 
-def init_db():
-    """Create the cars table if it doesn't exist, and seed sample data once."""
-    conn = get_db()
-    conn.execute(
+from eda_engine import load_file, run_full_eda
+import charts
+from report_builder import build_html_report
+
+st.set_page_config(page_title="Auto-EDA", page_icon="📊", layout="wide")
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+st.sidebar.title("📊 Auto-EDA")
+st.sidebar.write(
+    "Upload a dataset and get an instant, automated exploratory data "
+    "analysis — stats, missing values, outliers, distributions, "
+    "correlations, and charts. Download everything as a report."
+)
+st.sidebar.markdown("---")
+uploaded = st.sidebar.file_uploader(
+    "Upload a file",
+    type=["csv", "tsv", "txt", "xlsx", "xls", "json", "parquet"],
+    help="Supported: CSV, TSV, TXT, Excel (xlsx/xls), JSON, Parquet",
+)
+top_n_cats = st.sidebar.slider("Top-N values per categorical column", 5, 30, 10)
+sample_note = st.sidebar.empty()
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Runs 100% locally. Your data never leaves your machine.")
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+st.title("Automated Exploratory Data Analysis")
+
+if uploaded is None:
+    st.info("👈 Upload a CSV, Excel, JSON, TSV, or Parquet file from the sidebar to get started.")
+    st.markdown(
         """
-        CREATE TABLE IF NOT EXISTS cars (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            brand TEXT NOT NULL,
-            model TEXT NOT NULL,
-            year INTEGER NOT NULL,
-            price REAL NOT NULL,
-            fuel_type TEXT NOT NULL,
-            mileage INTEGER NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'Available',
-            created_at TEXT NOT NULL
-        )
+        **What this app does automatically:**
+        - 📋 Dataset overview (rows, columns, memory, duplicates)
+        - 🧩 Column types & completeness
+        - ❓ Missing value analysis (table + chart)
+        - 🔢 Numeric summary statistics (mean, std, skew, kurtosis, normality test)
+        - 🚨 Outlier detection (IQR method + Z-score method)
+        - 📈 Auto-generated distribution charts (histogram + boxplot per numeric column)
+        - 🔤 Categorical breakdowns (top values + bar charts)
+        - 🔗 Correlation heatmap + top correlated pairs
+        - 📥 One-click download: full HTML report + ZIP of all tables as CSV
         """
     )
-    conn.commit()
+    st.stop()
 
-    count = conn.execute("SELECT COUNT(*) AS c FROM cars").fetchone()["c"]
-    if count == 0:
-        seed = [
-            ("Toyota", "Camry", 2022, 28500, "Petrol", 15000, "Available"),
-            ("Toyota", "Corolla", 2023, 23000, "Hybrid", 8000, "Available"),
-            ("Honda", "Civic", 2021, 24500, "Petrol", 22000, "Sold"),
-            ("Honda", "CR-V", 2023, 32000, "Hybrid", 5000, "Available"),
-            ("Tesla", "Model 3", 2023, 41000, "Electric", 3000, "Available"),
-            ("Tesla", "Model Y", 2022, 49500, "Electric", 12000, "Reserved"),
-            ("Ford", "F-150", 2021, 38000, "Petrol", 30000, "Sold"),
-            ("Ford", "Mustang", 2023, 45000, "Petrol", 2000, "Available"),
-            ("BMW", "3 Series", 2022, 47000, "Diesel", 18000, "Available"),
-            ("BMW", "X5", 2023, 68000, "Diesel", 6000, "Reserved"),
-            ("Hyundai", "Elantra", 2021, 21000, "Petrol", 25000, "Sold"),
-            ("Hyundai", "Ioniq 5", 2023, 44000, "Electric", 4000, "Available"),
-        ]
-        now = datetime.utcnow().isoformat()
-        conn.executemany(
-            """
-            INSERT INTO cars (brand, model, year, price, fuel_type, mileage, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [s + (now,) for s in seed],
+# ---- Load file ----
+try:
+    df = load_file(uploaded, uploaded.name)
+except Exception as e:
+    st.error(f"Could not read this file: {e}")
+    st.stop()
+
+if df.empty:
+    st.warning("The uploaded file loaded but contains no rows.")
+    st.stop()
+
+st.success(f"Loaded **{uploaded.name}** — {df.shape[0]:,} rows × {df.shape[1]:,} columns")
+
+with st.expander("🔍 Preview raw data (first 50 rows)"):
+    st.dataframe(df.head(50), use_container_width=True)
+
+# ---- Run EDA (cached so re-render on widget interaction is instant) ----
+@st.cache_data(show_spinner=False)
+def cached_eda(df_json, top_n):
+    df_local = pd.read_json(io.StringIO(df_json), orient="split")
+    return run_full_eda(df_local), df_local
+
+with st.spinner("Running automated EDA..."):
+    try:
+        df_json = df.to_json(orient="split", date_format="iso")
+        results, _ = cached_eda(df_json, top_n_cats)
+        # re-run categorical with chosen top_n directly (cheap, not cached separately)
+        from eda_engine import get_categorical_summary
+        results["categorical_summary"] = get_categorical_summary(
+            df, results["overview"]["categorical_cols"], top_n=top_n_cats
         )
-        conn.commit()
-    conn.close()
+    except Exception as e:
+        st.error(f"EDA failed: {e}")
+        st.stop()
 
+ov = results["overview"]
 
-# --------------------------------------------------------------------------- #
-# Dashboard
-# --------------------------------------------------------------------------- #
-@app.route("/")
-def dashboard():
-    conn = get_db()
-    cars = conn.execute("SELECT * FROM cars").fetchall()
-    conn.close()
+# ---------------------------------------------------------------------------
+# Tabs
+# ---------------------------------------------------------------------------
+tab_overview, tab_missing, tab_numeric, tab_outliers, tab_cat, tab_corr, tab_download = st.tabs(
+    ["📋 Overview", "❓ Missing", "🔢 Numeric", "🚨 Outliers", "🔤 Categorical", "🔗 Correlation", "📥 Download"]
+)
 
-    total = len(cars)
-    total_value = sum(c["price"] for c in cars)
-    avg_price = total_value / total if total else 0
-    available = sum(1 for c in cars if c["status"] == "Available")
+# --- Overview ---
+with tab_overview:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", f"{ov['n_rows']:,}")
+    c2.metric("Columns", f"{ov['n_cols']:,}")
+    c3.metric("Missing cells", f"{ov['missing_pct']}%")
+    c4.metric("Duplicate rows", f"{ov['duplicate_rows']:,}")
 
-    stats = {
-        "total": total,
-        "total_value": round(total_value, 2),
-        "avg_price": round(avg_price, 2),
-        "available": available,
-    }
-    return render_template("dashboard.html", stats=stats)
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Numeric columns", len(ov["numeric_cols"]))
+    c6.metric("Categorical columns", len(ov["categorical_cols"]))
+    c7.metric("Memory usage", f"{ov['memory_mb']} MB")
 
+    if ov["likely_datetime_cols"]:
+        st.info(f"🕒 Possible date/time columns detected: {', '.join(ov['likely_datetime_cols'])}")
 
-@app.route("/api/chart-data")
-def chart_data():
-    """Aggregated data for the dashboard charts, consumed via fetch() in JS."""
-    conn = get_db()
-    cars = conn.execute("SELECT * FROM cars").fetchall()
-    conn.close()
+    st.subheader("Column Types & Completeness")
+    st.dataframe(results["dtype_table"], use_container_width=True)
 
-    by_brand = {}
-    by_fuel = {}
-    by_status = {}
-    by_year = {}
-
-    for c in cars:
-        by_brand[c["brand"]] = by_brand.get(c["brand"], 0) + 1
-        by_fuel[c["fuel_type"]] = by_fuel.get(c["fuel_type"], 0) + 1
-        by_status[c["status"]] = by_status.get(c["status"], 0) + 1
-        by_year[c["year"]] = by_year.get(c["year"], 0) + c["price"]
-
-    return jsonify(
-        {
-            "by_brand": by_brand,
-            "by_fuel": by_fuel,
-            "by_status": by_status,
-            "by_year": dict(sorted(by_year.items())),
-        }
-    )
-
-
-# --------------------------------------------------------------------------- #
-# CRUD: list / create / edit / delete
-# --------------------------------------------------------------------------- #
-@app.route("/cars")
-def list_cars():
-    conn = get_db()
-    q = request.args.get("q", "").strip()
-    if q:
-        cars = conn.execute(
-            "SELECT * FROM cars WHERE brand LIKE ? OR model LIKE ? ORDER BY id DESC",
-            (f"%{q}%", f"%{q}%"),
-        ).fetchall()
+# --- Missing ---
+with tab_missing:
+    fig = charts.missing_values_bar(results["missing_summary"])
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        cars = conn.execute("SELECT * FROM cars ORDER BY id DESC").fetchall()
-    conn.close()
-    return render_template("cars_list.html", cars=cars, q=q)
+        st.success("🎉 No missing values found in this dataset!")
+    st.dataframe(results["missing_summary"], use_container_width=True)
 
+# --- Numeric ---
+with tab_numeric:
+    if ov["numeric_cols"]:
+        st.subheader("Summary Statistics")
+        st.dataframe(results["numeric_summary"], use_container_width=True)
 
-@app.route("/cars/new", methods=["GET", "POST"])
-def new_car():
-    if request.method == "POST":
-        data = _extract_form()
-        error = _validate(data)
-        if error:
-            flash(error, "error")
-            return render_template("car_form.html", car=data, mode="new")
+        st.subheader("Distributions")
+        sel_col = st.selectbox("Choose a numeric column to inspect", ov["numeric_cols"])
+        c1, c2 = st.columns(2)
+        with c1:
+            f = charts.histogram(df, sel_col)
+            if f:
+                st.plotly_chart(f, use_container_width=True)
+        with c2:
+            f = charts.boxplot(df, sel_col)
+            if f:
+                st.plotly_chart(f, use_container_width=True)
 
-        conn = get_db()
-        conn.execute(
-            """
-            INSERT INTO cars (brand, model, year, price, fuel_type, mileage, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                data["brand"],
-                data["model"],
-                data["year"],
-                data["price"],
-                data["fuel_type"],
-                data["mileage"],
-                data["status"],
-                datetime.utcnow().isoformat(),
-            ),
+        if len(ov["numeric_cols"]) >= 2:
+            st.subheader("Scatter Matrix (first 5 numeric columns)")
+            f = charts.scatter_matrix(df, ov["numeric_cols"])
+            if f:
+                st.plotly_chart(f, use_container_width=True)
+    else:
+        st.info("No numeric columns found in this dataset.")
+
+# --- Outliers ---
+with tab_outliers:
+    if not results["outliers"].empty:
+        st.dataframe(results["outliers"], use_container_width=True)
+        st.caption(
+            "**IQR method**: flags points beyond 1.5×IQR from Q1/Q3. "
+            "**Z-score method**: flags points more than 3 standard deviations from the mean."
         )
-        conn.commit()
-        conn.close()
-        flash(f"Added {data['brand']} {data['model']}.", "success")
-        return redirect(url_for("list_cars"))
+    else:
+        st.info("No numeric columns to check for outliers.")
 
-    return render_template("car_form.html", car=None, mode="new")
+# --- Categorical ---
+with tab_cat:
+    if ov["categorical_cols"]:
+        sel_cat = st.selectbox("Choose a categorical column to inspect", ov["categorical_cols"])
+        info = results["categorical_summary"][sel_cat]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Unique values", info["unique"])
+        c2.metric("Missing", info["missing"])
+        c3.metric("Most common", str(info["mode"]))
+        f = charts.bar_categorical(df, sel_cat, top_n=top_n_cats)
+        if f:
+            st.plotly_chart(f, use_container_width=True)
+        st.dataframe(info["top_values"], use_container_width=True)
+    else:
+        st.info("No categorical columns found in this dataset.")
 
+# --- Correlation ---
+with tab_corr:
+    if not results["correlation"].empty:
+        f = charts.correlation_heatmap(results["correlation"])
+        st.plotly_chart(f, use_container_width=True)
+        st.subheader("Top correlated pairs")
+        st.dataframe(results["top_correlations"], use_container_width=True)
 
-@app.route("/cars/<int:car_id>/edit", methods=["GET", "POST"])
-def edit_car(car_id):
-    conn = get_db()
-    car = conn.execute("SELECT * FROM cars WHERE id = ?", (car_id,)).fetchone()
-    if car is None:
-        conn.close()
-        flash("Car not found.", "error")
-        return redirect(url_for("list_cars"))
+        st.subheader("Explore a pair")
+        c1, c2 = st.columns(2)
+        with c1:
+            x_col = st.selectbox("X axis", ov["numeric_cols"], key="x_pick")
+        with c2:
+            y_col = st.selectbox("Y axis", ov["numeric_cols"], index=min(1, len(ov["numeric_cols"]) - 1), key="y_pick")
+        f2 = charts.pairwise_scatter(df, x_col, y_col)
+        if f2:
+            st.plotly_chart(f2, use_container_width=True)
+    else:
+        st.info("Need at least 2 numeric columns to compute correlations.")
 
-    if request.method == "POST":
-        data = _extract_form()
-        error = _validate(data)
-        if error:
-            flash(error, "error")
-            conn.close()
-            return render_template("car_form.html", car={**data, "id": car_id}, mode="edit")
+# --- Download ---
+with tab_download:
+    st.subheader("📥 Export your results")
+    st.write("Generate a full, self-contained HTML report (opens in any browser, includes all charts) "
+             "or download every summary table as CSVs in a ZIP.")
 
-        conn.execute(
-            """
-            UPDATE cars
-            SET brand = ?, model = ?, year = ?, price = ?, fuel_type = ?, mileage = ?, status = ?
-            WHERE id = ?
-            """,
-            (
-                data["brand"],
-                data["model"],
-                data["year"],
-                data["price"],
-                data["fuel_type"],
-                data["mileage"],
-                data["status"],
-                car_id,
-            ),
+    colA, colB = st.columns(2)
+
+    with colA:
+        if st.button("🧾 Generate HTML report", use_container_width=True):
+            with st.spinner("Building report..."):
+                figures = {
+                    "missing_bar": charts.missing_values_bar(results["missing_summary"]),
+                    "histograms": {c: charts.histogram(df, c) for c in ov["numeric_cols"]},
+                    "boxplots": {c: charts.boxplot(df, c) for c in ov["numeric_cols"]},
+                    "categorical_bars": {c: charts.bar_categorical(df, c, top_n=top_n_cats) for c in ov["categorical_cols"]},
+                    "corr_heatmap": charts.correlation_heatmap(results["correlation"]) if not results["correlation"].empty else None,
+                }
+                html_str = build_html_report(df, results, figures, filename=uploaded.name)
+                st.session_state["html_report"] = html_str
+            st.success("Report ready — click below to download.")
+
+        if "html_report" in st.session_state:
+            st.download_button(
+                "⬇️ Download HTML report",
+                data=st.session_state["html_report"],
+                file_name=f"EDA_report_{uploaded.name.rsplit('.',1)[0]}_{datetime.date.today()}.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+
+    with colB:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("dtype_summary.csv", results["dtype_table"].to_csv(index=False))
+            zf.writestr("missing_values.csv", results["missing_summary"].to_csv(index=False))
+            zf.writestr("numeric_summary.csv", results["numeric_summary"].to_csv(index=False))
+            zf.writestr("outliers.csv", results["outliers"].to_csv(index=False))
+            if not results["correlation"].empty:
+                zf.writestr("correlation_matrix.csv", results["correlation"].to_csv())
+                zf.writestr("top_correlations.csv", results["top_correlations"].to_csv(index=False))
+            for col, info in results["categorical_summary"].items():
+                safe = "".join(ch if ch.isalnum() else "_" for ch in col)
+                zf.writestr(f"categorical_{safe}.csv", info["top_values"].to_csv(index=False))
+        buf.seek(0)
+
+        st.write("")  # spacing to align button vertically with left column
+        st.download_button(
+            "⬇️ Download all tables (ZIP of CSVs)",
+            data=buf,
+            file_name=f"EDA_tables_{uploaded.name.rsplit('.',1)[0]}_{datetime.date.today()}.zip",
+            mime="application/zip",
+            use_container_width=True,
         )
-        conn.commit()
-        conn.close()
-        flash(f"Updated {data['brand']} {data['model']}.", "success")
-        return redirect(url_for("list_cars"))
 
-    conn.close()
-    return render_template("car_form.html", car=car, mode="edit")
-
-
-@app.route("/cars/<int:car_id>/delete", methods=["POST"])
-def delete_car(car_id):
-    conn = get_db()
-    car = conn.execute("SELECT * FROM cars WHERE id = ?", (car_id,)).fetchone()
-    if car:
-        conn.execute("DELETE FROM cars WHERE id = ?", (car_id,))
-        conn.commit()
-        flash(f"Deleted {car['brand']} {car['model']}.", "success")
-    conn.close()
-    return redirect(url_for("list_cars"))
-
-
-# --------------------------------------------------------------------------- #
-# Form helpers
-# --------------------------------------------------------------------------- #
-def _extract_form():
-    return {
-        "brand": request.form.get("brand", "").strip(),
-        "model": request.form.get("model", "").strip(),
-        "year": request.form.get("year", "").strip(),
-        "price": request.form.get("price", "").strip(),
-        "fuel_type": request.form.get("fuel_type", "Petrol"),
-        "mileage": request.form.get("mileage", "0").strip(),
-        "status": request.form.get("status", "Available"),
-    }
-
-
-def _validate(data):
-    if not data["brand"] or not data["model"]:
-        return "Brand and model are required."
-    try:
-        data["year"] = int(data["year"])
-        if data["year"] < 1900 or data["year"] > 2100:
-            return "Year must be a realistic number."
-    except (ValueError, TypeError):
-        return "Year must be a whole number."
-    try:
-        data["price"] = float(data["price"])
-        if data["price"] < 0:
-            return "Price can't be negative."
-    except (ValueError, TypeError):
-        return "Price must be a number."
-    try:
-        data["mileage"] = int(data["mileage"] or 0)
-        if data["mileage"] < 0:
-            return "Mileage can't be negative."
-    except (ValueError, TypeError):
-        return "Mileage must be a whole number."
-    if data["status"] not in ("Available", "Reserved", "Sold"):
-        return "Invalid status."
-    if data["fuel_type"] not in ("Petrol", "Diesel", "Hybrid", "Electric"):
-        return "Invalid fuel type."
-    return None
-
-
-if __name__ == "__main__":
-    init_db()
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    st.markdown("---")
+    st.caption(
+        "💡 Tip: the HTML report is fully self-contained (charts included) — "
+        "you can open it offline, email it, or print it to PDF from your browser (Ctrl/Cmd+P → Save as PDF)."
+    )
