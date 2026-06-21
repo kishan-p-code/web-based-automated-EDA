@@ -9,6 +9,7 @@ import streamlit as st
 from eda_engine import load_file, run_full_eda
 import charts
 from report_builder import build_html_report
+from chat_assistant import answer_question, SUGGESTED_QUESTIONS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -124,7 +125,14 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 st.markdown('<p class="main-header">Automated Exploratory Data Analysis</p>', unsafe_allow_html=True)
 
-if uploaded is None:
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
+
+# Resolve data source: uploaded file or sample dataset
+using_sample = uploaded is None and "sample_df" in st.session_state
+has_data = uploaded is not None or using_sample
+
+if not has_data:
     st.info("👈 Upload a CSV, Excel, JSON, TSV, or Parquet file from the sidebar to get started.")
     
     col1, col2 = st.columns(2)
@@ -142,28 +150,36 @@ if uploaded is None:
         - 📈 Auto-generated distribution charts (histogram + boxplot per numeric column)
         - 🔤 Categorical breakdowns (top values + bar charts)
         - 🔗 Correlation heatmap + top correlated pairs
+        - 💬 Chat assistant — ask questions about your data in plain English
         - 📥 One-click download: full HTML report + ZIP of all tables as CSV
         """)
     
     # Example data
     with st.expander("📊 Try with sample data", expanded=False):
         if st.button("Load Iris Dataset"):
-            df = pd.read_csv("https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv")
-            st.session_state["sample_df"] = df
+            st.session_state["sample_df"] = pd.read_csv(
+                "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/iris.csv"
+            )
+            st.session_state["sample_name"] = "iris.csv"
+            st.session_state["chat_history"] = []
             st.rerun()
         if st.button("Load Titanic Dataset"):
-            df = pd.read_csv("https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv")
-            st.session_state["sample_df"] = df
+            st.session_state["sample_df"] = pd.read_csv(
+                "https://raw.githubusercontent.com/datasciencedojo/datasets/master/titanic.csv"
+            )
+            st.session_state["sample_name"] = "titanic.csv"
+            st.session_state["chat_history"] = []
             st.rerun()
     
     st.stop()
 
-# Load sample data if available
-if "sample_df" in st.session_state and uploaded is None:
+# Load dataset
+dataset_name = uploaded.name if uploaded is not None else st.session_state.get("sample_name", "sample_dataset.csv")
+
+if using_sample:
     df = st.session_state["sample_df"].copy()
-    st.success(f"Loaded sample dataset — {df.shape[0]:,} rows × {df.shape[1]:,} columns")
+    st.success(f"✅ Loaded sample **{dataset_name}** — {df.shape[0]:,} rows × {df.shape[1]:,} columns")
 else:
-    # ---- Load file ----
     try:
         df = load_file(uploaded, uploaded.name)
     except Exception as e:
@@ -175,7 +191,8 @@ else:
         st.warning("⚠️ The uploaded file loaded but contains no rows.")
         st.stop()
 
-    st.success(f"✅ Loaded **{uploaded.name}** — {df.shape[0]:,} rows × {df.shape[1]:,} columns")
+    st.success(f"✅ Loaded **{dataset_name}** — {df.shape[0]:,} rows × {df.shape[1]:,} columns")
+    st.session_state["chat_history"] = []
 
 # Data preview
 with st.expander("🔍 Preview raw data (first 50 rows)", expanded=False):
@@ -255,8 +272,8 @@ if warnings:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_overview, tab_missing, tab_numeric, tab_outliers, tab_cat, tab_corr, tab_download = st.tabs(
-    ["📋 Overview", "❓ Missing", "🔢 Numeric", "🚨 Outliers", "🔤 Categorical", "🔗 Correlation", "📥 Download"]
+tab_overview, tab_missing, tab_numeric, tab_outliers, tab_cat, tab_corr, tab_chat, tab_download = st.tabs(
+    ["📋 Overview", "❓ Missing", "🔢 Numeric", "🚨 Outliers", "🔤 Categorical", "🔗 Correlation", "💬 Chat", "📥 Download"]
 )
 
 # --- Overview ---
@@ -274,6 +291,16 @@ with tab_overview:
 
     if ov["likely_datetime_cols"]:
         st.info(f"🕒 Possible date/time columns detected: {', '.join(ov['likely_datetime_cols'])}")
+        with st.expander("📈 Time series preview", expanded=False):
+            date_col = st.selectbox("Date column", ov["likely_datetime_cols"], key="ts_date_col")
+            value_candidates = ov["numeric_cols"] or [c for c in ov["columns"] if c != date_col]
+            if value_candidates:
+                value_col = st.selectbox("Value column", value_candidates, key="ts_value_col")
+                fig = charts.time_series_plot(df, date_col, value_col)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.caption("Could not build time series chart for the selected columns.")
 
     st.subheader("📋 Column Types & Completeness")
     st.dataframe(results["dtype_table"], use_container_width=True)
@@ -509,6 +536,39 @@ with tab_corr:
     else:
         st.info("ℹ️ Need at least 2 numeric columns to compute correlations.")
 
+# --- Chat ---
+with tab_chat:
+    st.subheader("💬 Ask about your data")
+    st.caption(
+        "Local assistant — answers are generated from your EDA results. "
+        "No API key needed; your data stays on your machine."
+    )
+
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    st.markdown("**Quick questions:**")
+    qcols = st.columns(2)
+    for i, sq in enumerate(SUGGESTED_QUESTIONS):
+        with qcols[i % 2]:
+            if st.button(sq, key=f"suggest_{i}", use_container_width=True):
+                reply = answer_question(sq, df, results)
+                st.session_state["chat_history"].append({"role": "user", "content": sq})
+                st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+                st.rerun()
+
+    if user_msg := st.chat_input("Ask about missing values, correlations, outliers, a column…"):
+        reply = answer_question(user_msg, df, results)
+        st.session_state["chat_history"].append({"role": "user", "content": user_msg})
+        st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+        st.rerun()
+
+    if st.session_state["chat_history"]:
+        if st.button("🗑️ Clear chat", type="secondary"):
+            st.session_state["chat_history"] = []
+            st.rerun()
+
 # --- Download ---
 with tab_download:
     st.subheader("📥 Export your results")
@@ -529,7 +589,7 @@ with tab_download:
                 }
                 html_str = build_html_report(
                     df, results, figures, 
-                    filename=uploaded.name if uploaded else "dataset",
+                    filename=dataset_name,
                     include_advanced_stats=show_advanced_stats
                 )
                 st.session_state["html_report"] = html_str
@@ -539,7 +599,7 @@ with tab_download:
             st.download_button(
                 "⬇️ Download HTML report",
                 data=st.session_state["html_report"],
-                file_name=f"EDA_report_{uploaded.name.rsplit('.',1)[0] if uploaded else 'dataset'}_{datetime.date.today()}.html",
+                file_name=f"EDA_report_{dataset_name.rsplit('.',1)[0]}_{datetime.date.today()}.html",
                 mime="text/html",
                 use_container_width=True,
             )
@@ -563,7 +623,7 @@ with tab_download:
         st.download_button(
             "⬇️ Download all tables (ZIP of CSVs)",
             data=buf,
-            file_name=f"EDA_tables_{uploaded.name.rsplit('.',1)[0] if uploaded else 'dataset'}_{datetime.date.today()}.zip",
+            file_name=f"EDA_tables_{dataset_name.rsplit('.',1)[0]}_{datetime.date.today()}.zip",
             mime="application/zip",
             use_container_width=True,
         )

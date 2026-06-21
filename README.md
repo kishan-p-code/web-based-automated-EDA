@@ -44,6 +44,7 @@ Open that URL in your browser. That's your "web app."
    - **Outliers** — IQR and Z-score outlier detection per column
    - **Categorical** — top values, bar charts, unique counts
    - **Correlation** — heatmap + top correlated pairs + custom scatter
+   - **Chat** — ask questions about your data in plain English (runs locally, no API key)
    - **Download** — generate and download:
      - a single self-contained **HTML report** (charts included, works offline)
      - a **ZIP of all summary tables as CSV**
@@ -62,6 +63,7 @@ auto-eda-app/
 ├── app.py              # Streamlit UI — upload, tabs, download buttons
 ├── eda_engine.py        # Core analysis logic (pandas/numpy/scipy, no UI)
 ├── charts.py            # All Plotly chart builders
+├── chat_assistant.py    # Local Q&A assistant for dataset questions
 ├── report_builder.py    # Builds the downloadable self-contained HTML report
 ├── requirements.txt
 └── README.md

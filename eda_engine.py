@@ -20,23 +20,35 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # 1. FILE LOADING (handles csv, tsv, xlsx, xls, json, parquet)
 # --------------------------------------------------------------------------
 
+def _reset_stream(uploaded_file):
+    """Rewind file-like uploads so pandas can read from the start."""
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+
+
 def load_file(uploaded_file, filename: str) -> pd.DataFrame:
     """
     Load a DataFrame from an uploaded file-like object based on its extension.
     `uploaded_file` must be a file-like object (has .read()) or a path.
     """
     name = filename.lower()
+    _reset_stream(uploaded_file)
 
     try:
         if name.endswith(".csv"):
-            # Try to detect encoding and separator
             return pd.read_csv(uploaded_file, encoding_errors="replace")
         elif name.endswith(".tsv"):
             return pd.read_csv(uploaded_file, sep="\t", encoding_errors="replace")
-        elif name.endswith(".xlsx") or name.endswith(".xls"):
+        elif name.endswith(".xlsx"):
             return pd.read_excel(uploaded_file, engine="openpyxl")
+        elif name.endswith(".xls"):
+            try:
+                return pd.read_excel(uploaded_file, engine="xlrd")
+            except Exception:
+                _reset_stream(uploaded_file)
+                return pd.read_excel(uploaded_file, engine="openpyxl")
         elif name.endswith(".json"):
-            # try records-style json first, fall back to normalize
+            _reset_stream(uploaded_file)
             data = json.load(uploaded_file) if hasattr(uploaded_file, "read") else json.loads(uploaded_file)
             try:
                 return pd.json_normalize(data)
@@ -45,7 +57,6 @@ def load_file(uploaded_file, filename: str) -> pd.DataFrame:
         elif name.endswith(".parquet"):
             return pd.read_parquet(uploaded_file)
         elif name.endswith(".txt"):
-            # Try to guess delimiter
             return pd.read_csv(uploaded_file, sep=None, engine="python")
         else:
             raise ValueError(f"Unsupported file type: {filename}")
