@@ -298,7 +298,7 @@ with tab_overview:
                 value_col = st.selectbox("Value column", value_candidates, key="ts_value_col")
                 fig = charts.time_series_plot(df, date_col, value_col)
                 if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key="overview_timeseries")
                 else:
                     st.caption("Could not build time series chart for the selected columns.")
 
@@ -317,15 +317,11 @@ with tab_overview:
             ]
         })
         fig = px.pie(col_types, values="Count", names="Type", title="Column Type Distribution", color_discrete_sequence=px.colors.qualitative.Set3)
-        st.plotly_chart(fig, use_container_width=True)
-
-# --- Missing ---
+        st.plotly_chart(fig, use_container_width=True, key="overview_col_types_pie")
 with tab_missing:
     fig = charts.missing_values_bar(results["missing_summary"])
     if fig:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.success("🎉 No missing values found in this dataset!")
+        st.plotly_chart(fig, use_container_width=True, key="missing_bar")
     st.dataframe(results["missing_summary"], use_container_width=True)
     
     # Visualize missing patterns
@@ -337,9 +333,7 @@ with tab_missing:
                 missing_matrix = missing_matrix.sample(1000, random_state=42)
             fig = charts.missing_pattern_heatmap(missing_matrix)
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
-
-# --- Numeric ---
+                st.plotly_chart(fig, use_container_width=True, key="missing_pattern_heatmap")
 with tab_numeric:
     if ov["numeric_cols"]:
         st.subheader("📊 Summary Statistics")
@@ -369,26 +363,24 @@ with tab_numeric:
         with c1:
             f = charts.histogram(df, sel_col)
             if f:
-                st.plotly_chart(f, use_container_width=True)
+                st.plotly_chart(f, use_container_width=True, key=f"numeric_hist_{sel_col}")
         with c2:
             f = charts.boxplot(df, sel_col)
             if f:
-                st.plotly_chart(f, use_container_width=True)
+                st.plotly_chart(f, use_container_width=True, key=f"numeric_box_{sel_col}")
         
         # QQ plot for normality check
         with st.expander("📐 Normality Check (Q-Q Plot)", expanded=False):
             fig = charts.qq_plot(df, sel_col)
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"numeric_qq_{sel_col}")
                 st.caption("If points fall approximately along the diagonal line, the data is approximately normally distributed.")
 
         if len(ov["numeric_cols"]) >= 2:
             st.subheader("🔢 Scatter Matrix (first 5 numeric columns)")
             f = charts.scatter_matrix(df, ov["numeric_cols"])
             if f:
-                st.plotly_chart(f, use_container_width=True)
-            
-            # Pairwise correlation with scatter plot
+                st.plotly_chart(f, use_container_width=True, key="numeric_scatter_matrix")
             with st.expander("📊 Pairwise Comparison", expanded=False):
                 col1, col2 = st.columns(2)
                 with col1:
@@ -398,8 +390,7 @@ with tab_numeric:
                 if x_col != y_col:
                     f2 = charts.pairwise_scatter(df, x_col, y_col)
                     if f2:
-                        st.plotly_chart(f2, use_container_width=True)
-                        # Show correlation
+                        st.plotly_chart(f2, use_container_width=True, key=f"numeric_pair_{x_col}_{y_col}")
                         corr = df[x_col].corr(df[y_col])
                         st.metric("Pearson Correlation", f"{corr:.4f}")
     else:
@@ -428,9 +419,7 @@ with tab_outliers:
                 fig = px.bar(outlier_counts, x="Column", y="Count", color="Method", 
                            title="Outlier Counts by Method",
                            barmode="group")
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Detailed outlier view for selected column
+                st.plotly_chart(fig, use_container_width=True, key="outlier_dist_bar")
         if ov["numeric_cols"]:
             outlier_col = st.selectbox("View outliers for column", ov["numeric_cols"], key="outlier_col")
             s = df[outlier_col].dropna()
@@ -481,8 +470,7 @@ with tab_cat:
         
         f = charts.bar_categorical(df, sel_cat, top_n=top_n_cats)
         if f:
-            st.plotly_chart(f, use_container_width=True)
-        st.dataframe(info["top_values"], use_container_width=True)
+            st.plotly_chart(f, use_container_width=True, key=f"cat_bar_{sel_cat}")
         
         # Show frequency table with percentages
         with st.expander("📊 Full Frequency Table", expanded=False):
@@ -503,9 +491,7 @@ with tab_corr:
         
         f = charts.correlation_heatmap(results["correlation"])
         if f:
-            st.plotly_chart(f, use_container_width=True)
-        
-        st.subheader("🏆 Top correlated pairs")
+            st.plotly_chart(f, use_container_width=True, key="corr_heatmap")
         st.dataframe(results["top_correlations"], use_container_width=True)
         
         # Interactive pair exploration
@@ -519,7 +505,7 @@ with tab_corr:
             # Use the pairwise scatter function that doesn't require statsmodels
             f2 = charts.pairwise_scatter(df, x_col, y_col)
             if f2:
-                st.plotly_chart(f2, use_container_width=True)
+                st.plotly_chart(f2, use_container_width=True, key=f"corr_pair_{x_col}_{y_col}")
                 corr = df[x_col].corr(df[y_col], method=correlation_method)
                 st.metric(f"{correlation_method.capitalize()} Correlation", f"{corr:.4f}")
         else:
