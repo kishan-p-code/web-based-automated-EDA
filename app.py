@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Auto-EDA",
-    page_icon="📊",
+    page_icon="icon.png",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -60,7 +60,12 @@ st.markdown("""
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 📊 Auto-EDA")
+
+    col1, col2, col3 = st.columns([2, 2, 2])
+    
+    with col2:
+        st.image("icon.png", width=1000)
+
     st.markdown("---")
     st.write(
         "Upload a dataset and get an instant, automated exploratory data "
